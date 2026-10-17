@@ -1,0 +1,108 @@
+# Tên workflow hiển thị trong tab Actions của GitHub
+name: Flutter CI/CD
+
+# Điều kiện kích hoạt workflow
+on:
+  push:
+    branches: [ "main" ]          # Mỗi lần push lên main -> chạy CI + CD
+  pull_request:
+    branches: [ "main" ]          # Mỗi lần mở PR vào main -> chỉ chạy CI (CD bị chặn bởi điều kiện if bên dưới)
+
+jobs:
+  # ==========================================================
+  # CI: kiểm tra chất lượng code (chạy cả với push và PR)
+  # ==========================================================
+  test:
+    runs-on: ubuntu-latest        # Máy ảo Ubuntu do GitHub cung cấp
+    defaults:
+      run:
+        working-directory: shop_now   # Mọi lệnh `run` chạy trong thư mục dự án Flutter
+    steps:
+      # Lấy source code của repo về máy ảo
+      - uses: actions/checkout@v4
+
+      # Cài Flutter SDK (kênh stable), bật cache để lần sau chạy nhanh hơn
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      # Tải các package khai báo trong pubspec.yaml
+      - run: flutter pub get
+
+      # Phân tích tĩnh: phát hiện lỗi cú pháp, cảnh báo, vi phạm lint
+      - run: flutter analyze
+
+      # Chạy toàn bộ unit/widget test
+      - run: flutter test
+
+  # ==========================================================
+  # CD (Web): build và deploy lên Firebase Hosting để demo
+  # ==========================================================
+  deploy-web:
+    needs: test                   # Chỉ chạy khi job `test` thành công
+    # Chỉ deploy khi là push trực tiếp lên main (PR sẽ không deploy)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: shop_now
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      # Build web bản release, kết quả nằm ở shop_now/build/web
+      - run: flutter build web --release
+
+      # Đẩy thư mục build lên Firebase Hosting
+      - uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}                          # Token tự có sẵn, dùng để bình luận trạng thái deploy
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }} # JSON service account của Firebase (lưu trong GitHub Secrets)
+          projectId: ${{ secrets.FIREBASE_PROJECT_ID }}                   # ID project Firebase
+          channelId: live                                                 # `live` = deploy bản chính thức (không phải preview)
+          entryPoint: shop_now                                            # Thư mục chứa firebase.json
+
+  # ==========================================================
+  # CD (Android): build APK và phát hành cho tester
+  # ==========================================================
+  distribute-android:
+    needs: test                   # Chỉ chạy khi test thành công
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: shop_now
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build Android cần Java; Flutter hiện tại yêu cầu JDK 17
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      # Build file APK bản release
+      - run: flutter build apk --release
+
+      # Upload APK lên Firebase App Distribution
+      - uses: wzieba/Firebase-Distribution-Github-Action@v1
+        with:
+          appId: ${{ secrets.FIREBASE_ANDROID_APP_ID }}                          # App ID của ứng dụng Android trên Firebase
+          serviceCredentialsFileContent: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }} # Credential để được phép upload
+          groups: testers                                                        # Tên nhóm tester nhận bản build (tạo trước trên Firebase)
+          file: shop_now/build/app/outputs/flutter-apk/app-release.apk           # Đường dẫn APK (tính từ gốc repo, nên giữ nguyên tiền tố shop_now/)
+          releaseNotes: ${{ github.event.head_commit.message }}                  # Dùng commit message làm ghi chú phát hành
